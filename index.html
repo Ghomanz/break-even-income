@@ -446,42 +446,70 @@ function parseStatementRows(rows) {
 }
 
 /* PDF text lines -> transactions */
-var PDF_MONEY = /-?\$?\(?\d[\d,]*\.\d{2}\)?-?(?:\s?(?:CR|DR)\b)?/gi;
-var PDF_DATE = /^\s*(\d{1,2})\s*[\/\-. ]\s*(\d{1,2}|[A-Za-z]{3,9})(?:\s*[\/\-.]\s*(\d{2,4})|\s+(\d{4})(?!\d))?(?=\s|$)/;
-function pdfDateFromMatch(m, year) {
-  var day = +m[1], mo;
-  if (/^\d+$/.test(m[2])) mo = +m[2] - 1; else { mo = MONTHS[m[2].slice(0, 3).toLowerCase()]; if (mo === undefined) return null; }
-  var ys = m[3] || m[4]; var y = ys ? +ys : year; if (y < 100) y += 2000;
-  return mkDate(y, mo, day);
+var PDF_DATE_DM = /^\s*(\d{1,2})\s*[\/\-. ]\s*(\d{1,2}|[A-Za-z]{3,9})(?:\s*[\/\-.]\s*(\d{2,4})|\s+(\d{4})(?!\d))?(?=\s|$)/;
+var PDF_DATE_MD = /^\s*([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:\s*,?\s*(\d{4})(?!\d))?(?=\s|$)/;
+var PDF_MONEY_ITEM = /^[-+]?\$?\(?\d[\d,]*[. ]\d{2}\)?-?(?:\s?(?:CR|DR))?$/i;
+var MONTH_WORD = /^(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|june?|july?|aug(ust)?|sep(t(ember)?)?|oct(ober)?|nov(ember)?|dec(ember)?)$/i;
+function normMoney(t) { return t.replace(/^([-+$(]*\d[\d,]*)\s(\d{2})(\)?-?(?:\s?(?:CR|DR))?)$/i, '$1.$2$3'); }
+function pdfDateAt(s, year) {
+  var m = s.match(PDF_DATE_DM), day, mo, ys;
+  if (m) {
+    day = +m[1];
+    if (/^\d+$/.test(m[2])) mo = +m[2] - 1;
+    else { if (!MONTH_WORD.test(m[2])) return null; mo = MONTHS[m[2].slice(0, 3).toLowerCase()]; }
+    ys = m[3] || m[4];
+  } else {
+    m = s.match(PDF_DATE_MD); if (!m || !MONTH_WORD.test(m[1])) return null;
+    mo = MONTHS[m[1].slice(0, 3).toLowerCase()]; day = +m[2]; ys = m[3];
+  }
+  if (mo === undefined) return null;
+  var y = ys ? +ys : year; if (y < 100) y += 2000;
+  var ms = mkDate(y, mo, day); if (ms == null) return null;
+  return { ms: ms, len: m[0].length, noYear: !ys, month: mo, day: day, year: y };
 }
 function parseStatementLines(lines) {
-  var all = lines.join(' ');
-  var ym = all.match(/\b(20\d{2})\b/);
-  var year = ym ? +ym[1] : new Date().getUTCFullYear();
+  var nowY = new Date().getUTCFullYear(), counts = {}, year = nowY, bc = 0;
+  (lines.join(' ').match(/\b20\d{2}\b/g) || []).forEach(function (y) { y = +y; if (y >= nowY - 8 && y <= nowY + 1) counts[y] = (counts[y] || 0) + 1; });
+  Object.keys(counts).forEach(function (y) { if (counts[y] > bc || (counts[y] === bc && +y > year)) { bc = counts[y]; year = +y; } });
   var skip = /opening balance|closing balance|balance brought|brought forward|carried forward|total|minimum|credit limit|available|interest rate/i;
-  var ents = [];
+  var ents = [], last = null, lastDate = null;
   lines.forEach(function (raw) {
-    var line = raw.replace(/\s+/g, ' ').trim();
-    var m = line.match(PDF_DATE); if (!m) return;
-    var d = pdfDateFromMatch(m, year); if (d == null) return;
-    var rest = line.slice(m[0].length).trim();
-    var m2 = rest.match(PDF_DATE);
-    if (m2 && pdfDateFromMatch(m2, year) != null) rest = rest.slice(m2[0].length).trim();
-    var tokens = rest.match(PDF_MONEY); if (!tokens) return;
-    var desc = rest.replace(PDF_MONEY, ' ').replace(/\s+/g, ' ').trim();
-    if (!desc || skip.test(desc)) return;
-    var vals = tokens.map(parseAmount);
-    if (vals.some(function (v) { return v == null; })) return;
-    var e = { date: d, desc: desc, abs: 0, bal: null, signed: null, tok: null };
-    if (tokens.length === 1) {
-      e.abs = Math.abs(vals[0]);
-      e.signed = /CR$/i.test(tokens[0].trim()) ? e.abs : -e.abs;
-    } else {
-      e.abs = Math.abs(vals[vals.length - 2]); e.bal = vals[vals.length - 1];
-      e.tok = tokens[tokens.length - 2];
+    var line = String(raw).trim();
+    if (/^(CR|DR)$/i.test(line)) { if (last && last.bal == null && /^CR$/i.test(line)) last.signed = last.abs; return; }
+    var d = pdfDateAt(line, year), rest;
+    if (d) {
+      lastDate = d.ms; rest = line.slice(d.len).trim();
+      var d2 = pdfDateAt(rest, year); if (d2) rest = rest.slice(d2.len).trim();
+    } else if (lastDate != null && /^interest charge/i.test(line)) {
+      d = { ms: lastDate, noYear: false, month: 0, day: 1, year: year }; rest = line;
+    } else return;
+    var items = rest.split(/\s{2,}/).map(function (x) { return x.trim(); }).filter(Boolean);
+    var toks = [];
+    while (items.length) {
+      var it = items[items.length - 1];
+      if (/^(CR|DR)$/i.test(it) && items.length > 1 && PDF_MONEY_ITEM.test(items[items.length - 2])) { toks.unshift(items[items.length - 2] + ' ' + it); items.length -= 2; }
+      else if (PDF_MONEY_ITEM.test(it)) { toks.unshift(it); items.pop(); }
+      else break;
     }
-    if (e.abs > 0) ents.push(e);
+    if (!toks.length) return;
+    toks = toks.map(normMoney);
+    var vals = toks.map(parseAmount);
+    if (vals.some(function (v) { return v == null; })) return;
+    var desc = items.join(' ').replace(/\s+/g, ' ').trim();
+    if (!desc || skip.test(desc)) return;
+    var e = { date: d.ms, noYear: d.noYear, month: d.month, day: d.day, year: d.year, desc: desc, abs: 0, bal: null, signed: null, tok: null };
+    if (toks.length === 1) {
+      e.abs = Math.abs(vals[0]);
+      e.signed = (/CR$/i.test(toks[0]) || /-$/.test(toks[0])) ? e.abs : -e.abs;
+    } else {
+      e.abs = Math.abs(vals[vals.length - 2]); e.bal = vals[vals.length - 1]; e.tok = toks[toks.length - 2];
+    }
+    if (e.abs > 0) { ents.push(e); last = e; }
   });
+  var ny = ents.filter(function (e) { return e.noYear; });
+  if (ny.some(function (e) { return e.month <= 2; }) && ny.some(function (e) { return e.month >= 9; })) {
+    ny.forEach(function (e) { if (e.month >= 9) { var m2 = mkDate(e.year - 1, e.month, e.day); if (m2 != null) e.date = m2; } });
+  }
   var withBal = ents.filter(function (e) { return e.bal != null; });
   var fwd = 0, rev = 0, i;
   for (i = 1; i < withBal.length; i++) {
