@@ -271,6 +271,14 @@ var CATS = [
   { n: 'Transfers & card payments', k: 'ignore', e: false }
 ];
 var CAT_BY_NAME = {}; CATS.forEach(function (c) { CAT_BY_NAME[c.n] = c; });
+function addCustomCat(name, kind, ess) {
+  name = String(name || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  if (!name) return null;
+  for (var i = 0; i < CATS.length; i++) if (CATS[i].n.toLowerCase() === name.toLowerCase()) return CATS[i].n;
+  var c = { n: name, k: kind === 'income' ? 'income' : 'expense', e: !!ess, custom: true };
+  var at = CATS.length - 1; for (var j = 0; j < CATS.length; j++) if (CATS[j].k === 'ignore') { at = j; break; }
+  CATS.splice(at, 0, c); CAT_BY_NAME[name] = c; return name;
+}
 
 var TRANSFER_RE = /internal transfer|transfer (to|from) (xx\d+|cba a\/c|commbank|savings|cc\b|credit|own|my)\b|payment.{0,20}thank you|credit card (payment|repay)|bpay.*(visa|mastercard|credit card|amex)|autopay|card payment received|payment received|funds transfer|xfer|american express|\bamex\b|bankwest|periodical payment/i;
 var INCOME_RULES = [
@@ -957,9 +965,12 @@ function detectRepayment(txns) {
       return '<div class="row"><div class="name">' + esc(m.name) + '</div><div class="amt num">' + money2.format(m.amount) + ' / ' + FREQ_LABEL[m.freq] + '</div><div class="meta">' + (m.kind === 'income' ? 'Money in' : m.kind === 'expense' ? 'Money out, must pay' : 'Money out, can skip') + ' <button class="btn link" type="button" data-delmanual="' + m.id + '">Remove</button></div></div>';
     }).join('');
   }
+  function catOptions(sel) {
+    return CATS.map(function (c) { return '<option value="' + esc(c.n) + '"' + (c.n === sel ? ' selected' : '') + '>' + esc(c.n) + '</option>'; }).join('') + '<option value="__new__">+ Add my own name…</option>';
+  }
   function renderTxns() {
     var sel = $('catFilter');
-    if (!sel.options.length) {
+    if (sel.options.length !== CATS.length + 1) {
       sel.innerHTML = '<option value="all">All categories</option>' + CATS.map(function (c) { return '<option value="' + esc(c.n) + '">' + esc(c.n) + '</option>'; }).join('');
     }
     sel.value = S.catFilter;
@@ -968,7 +979,7 @@ function detectRepayment(txns) {
     list.sort(function (a, b) { return S.catFilter === 'Other spending' ? Math.abs(b.amt) - Math.abs(a.amt) : b.t.date - a.t.date; });
     var shown = list.slice(0, S.limit);
     $('txns').innerHTML = shown.length ? shown.map(function (x) {
-      var opts = CATS.map(function (c) { return '<option value="' + esc(c.n) + '"' + (c.n === x.cat ? ' selected' : '') + '>' + esc(c.n) + '</option>'; }).join('');
+      var opts = catOptions(x.cat);
       return '<div class="txn"><div class="d">' + esc(x.t.desc || '(no description)') + '<div class="sm">' + fmtDate(x.t.date) + ' · ' + esc(x.f.name) + (x.f.include ? '' : ' · not counted') + '</div></div>' +
         '<div class="a num ' + (x.amt > 0 ? 'in' : '') + '">' + (x.amt > 0 ? '+' : '−') + money2.format(Math.abs(x.amt)) + '</div>' +
         '<select data-txn="' + x.t.id + '" aria-label="Category">' + opts + '</select></div>';
@@ -1016,7 +1027,17 @@ function detectRepayment(txns) {
     if (e.target.id === 'showMore') { S.limit += 200; renderTxns(); }
   });
   $('expenseRows').addEventListener('change', function (e) { var n = e.target.dataset.ess; if (n === undefined) return; S.ess[n] = e.target.checked; var R = view(); renderAnswer(R); renderBreakdown(R); });
-  $('txns').addEventListener('change', function (e) { var id = e.target.dataset.txn; if (id === undefined) return; var t = findTxn(id); t.userCat = e.target.value; var n = 0; if (t.key) { S.rules[t.key] = e.target.value; allTxns().forEach(function (x) { if (x.t.key === t.key) n++; }); } $('applyNote').textContent = n > 1 ? 'Set to "' + e.target.value + '" for all ' + n + ' similar transactions.' : ''; renderNumbers(); });
+  $('txns').addEventListener('change', function (e) {
+    var id = e.target.dataset.txn; if (id === undefined) return; var t = findTxn(id); var val = e.target.value;
+    if (val === '__new__') {
+      var isIn = eff(S.files.filter(function (f) { return f.txns.indexOf(t) >= 0; })[0], t) > 0;
+      var nm = window.prompt('Type the exact name for this ' + (isIn ? 'money in' : 'payment') + ' (e.g. Car registration, Tolls, School camp):', '');
+      var made = addCustomCat(nm, isIn ? 'income' : 'expense', false);
+      if (!made) { renderTxns(); return; }
+      if (!isIn && CAT_BY_NAME[made].custom && S.ess[made] === undefined && window.confirm('Is "' + made + '" a must-pay item (something you cannot skip)?')) S.ess[made] = true;
+      val = made;
+    }
+    t.userCat = val; var n = 0; if (t.key) { S.rules[t.key] = val; allTxns().forEach(function (x) { if (x.t.key === t.key) n++; }); } $('applyNote').textContent = n > 1 ? 'Set to "' + val + '" for all ' + n + ' similar transactions.' : ''; renderNumbers(); });
   $('search').addEventListener('input', function (e) { S.search = e.target.value; S.limit = 120; renderTxns(); });
   $('catFilter').addEventListener('change', function (e) { S.catFilter = e.target.value; S.limit = 120; renderTxns(); });
   $('manualForm').addEventListener('submit', function (e) {
